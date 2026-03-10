@@ -33,11 +33,16 @@ jobs:
         run: mkdir -p assets/sounds
 
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release
+          mkdir -p output
+          find build -name "*.apk" -exec cp {} output/speedlimit.apk \; 2>/dev/null || true
+          ls -la output/
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: speedlimit-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: output/speedlimit.apk
+          if-no-files-found: error
           retention-days: 30
