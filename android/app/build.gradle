@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "com.speedlimit.app"
-    compileSdk 34
+    compileSdk 35
     ndkVersion "26.3.11579264"
 
     compileOptions {
@@ -21,7 +21,7 @@ android {
     defaultConfig {
         applicationId "com.speedlimit.app"
         minSdk 23
-        targetSdk 34
+        targetSdk 35
         versionCode 1
         versionName "1.0.0"
     }
@@ -32,6 +32,9 @@ android {
             minifyEnabled false
             shrinkResources false
         }
+    }
+    buildFeatures {
+        buildConfig true
     }
 }
 
