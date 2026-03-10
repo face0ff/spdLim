@@ -32,17 +32,33 @@ jobs:
       - name: Create assets directory
         run: mkdir -p assets/sounds
 
-      - name: Build APK
-        run: |
-          flutter build apk --release
-          mkdir -p output
-          find build -name "*.apk" -exec cp {} output/speedlimit.apk \; 2>/dev/null || true
-          ls -la output/
+      - name: Generate Flutter build files
+        run: flutter build apk --release || true
 
-      - name: Upload APK artifact
+      - name: Build APK via Gradle directly
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Find and copy APK
+        run: |
+          echo "=== Searching for APK ==="
+          find . -name "*.apk" 2>/dev/null
+          mkdir -p output
+          APK=$(find . -name "*.apk" | head -1)
+          if [ -n "$APK" ]; then
+            cp "$APK" output/speedlimit.apk
+            echo "APK found and copied: $APK"
+            ls -lh output/
+          else
+            echo "ERROR: No APK found!"
+            exit 1
+          fi
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: speedlimit-apk
           path: output/speedlimit.apk
-          if-no-files-found: error
           retention-days: 30
