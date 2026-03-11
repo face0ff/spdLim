@@ -18,7 +18,6 @@ void main() {
 
 class SpeedLimitApp extends StatelessWidget {
   const SpeedLimitApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -50,9 +49,7 @@ class SpeedData {
     required this.hasGps,
   });
 
-  bool get isOverLimit =>
-      currentLimit != null && speedKmh > currentLimit! + 3;
-
+  bool get isOverLimit => currentLimit != null && speedKmh > currentLimit! + 3;
   bool get isNearLimit =>
       currentLimit != null &&
       speedKmh >= currentLimit! - 3 &&
@@ -70,67 +67,57 @@ class SpeedData {
 //  OVERPASS SERVICE
 // ─────────────────────────────────────────────
 class OverpassService {
-  // Two mirrors — fallback if one is down
   static const _mirrors = [
     'https://overpass.kumi.systems/api/interpreter',
     'https://overpass-api.de/api/interpreter',
   ];
 
-  int? _cachedLimit;
-  Position? _lastQueryPos;
+  int? _cachedCurrentLimit;
+  int? _cachedNextLimit;
 
-  /// Returns speed limit (km/h) or null if not found
-  Future<int?> fetchLimit(double lat, double lon) async {
-    // Only re-query if moved more than 20 m
-    if (_lastQueryPos != null) {
+  // Last positions where we did queries
+  Position? _lastCurrentQueryPos;
+  ({double lat, double lon})? _lastNextQueryPoint;
+
+  /// Current limit — re-query every 15 m
+  Future<int?> fetchCurrentLimit(double lat, double lon) async {
+    if (_lastCurrentQueryPos != null) {
       final dist = Geolocator.distanceBetween(
-          _lastQueryPos!.latitude, _lastQueryPos!.longitude, lat, lon);
-      if (dist < 20) return _cachedLimit;
+          _lastCurrentQueryPos!.latitude, _lastCurrentQueryPos!.longitude,
+          lat, lon);
+      if (dist < 15) return _cachedCurrentLimit;
     }
 
-    final query = '''
-[out:json][timeout:5];
-way[maxspeed](around:25,$lat,$lon);
-out tags;
-''';
-
-    for (final mirror in _mirrors) {
-      try {
-        final uri = Uri.parse(mirror).replace(queryParameters: {'data': query});
-        final resp = await http.get(uri).timeout(const Duration(seconds: 6));
-        if (resp.statusCode == 200) {
-          final limit = _parseMaxspeed(resp.body);
-          _cachedLimit = limit ?? _cachedLimit;
-          _lastQueryPos = Position(
-            latitude: lat,
-            longitude: lon,
-            timestamp: DateTime.now(),
-            accuracy: 0,
-            altitude: 0,
-            altitudeAccuracy: 0,
-            heading: 0,
-            headingAccuracy: 0,
-            speed: 0,
-            speedAccuracy: 0,
-          );
-          return _cachedLimit;
-        }
-      } catch (_) {
-        // try next mirror
-      }
+    final query = '[out:json][timeout:5];way[maxspeed](around:20,$lat,$lon);out tags;';
+    final result = await _query(query);
+    if (result != null) {
+      _cachedCurrentLimit = result;
+      _lastCurrentQueryPos = _fakePos(lat, lon);
     }
-    return _cachedLimit; // return cached on failure
+    return _cachedCurrentLimit;
   }
 
-  /// Fetch limit 300 m ahead based on heading
-  Future<int?> fetchNextLimit(double lat, double lon, double heading) async {
-    final ahead = _pointAhead(lat, lon, heading, 300);
-    final query = '''
-[out:json][timeout:5];
-way[maxspeed](around:30,${ahead.lat},${ahead.lon});
-out tags;
-''';
+  /// Next limit — look 200 m ahead, re-query every 30 m of movement
+  Future<int?> fetchNextLimit(double lat, double lon, double heading, double speedKmh) async {
+    // How far ahead to look: faster = look further
+    final lookAheadM = speedKmh > 80 ? 400.0 : speedKmh > 50 ? 300.0 : 200.0;
+    final ahead = _pointAhead(lat, lon, heading, lookAheadM);
 
+    if (_lastNextQueryPoint != null) {
+      final dist = Geolocator.distanceBetween(
+          _lastNextQueryPoint!.lat, _lastNextQueryPoint!.lon,
+          ahead.lat, ahead.lon);
+      if (dist < 30) return _cachedNextLimit;
+    }
+
+    final query = '[out:json][timeout:5];way[maxspeed](around:25,${ahead.lat},${ahead.lon});out tags;';
+    final result = await _query(query);
+    _cachedNextLimit = result;
+    _lastNextQueryPoint = ahead;
+    return _cachedNextLimit;
+  }
+
+  Future<int?> _query(String query) async {
     for (final mirror in _mirrors) {
       try {
         final uri = Uri.parse(mirror).replace(queryParameters: {'data': query});
@@ -159,7 +146,6 @@ out tags;
 
   int? _parseSpeedString(String raw) {
     if (raw.isEmpty) return null;
-    // Handle "RU:urban", "RU:rural", "XX:living_street" etc.
     final zones = {
       'ru:urban': 60, 'ru:rural': 90, 'ru:motorway': 110,
       'de:urban': 50, 'de:rural': 100, 'de:motorway': 130,
@@ -169,7 +155,6 @@ out tags;
     for (final e in zones.entries) {
       if (lower.contains(e.key)) return e.value;
     }
-    // Plain number, possibly "60 mph"
     final match = RegExp(r'(\d+)').firstMatch(raw);
     if (match == null) return null;
     int val = int.parse(match.group(1)!);
@@ -189,6 +174,12 @@ out tags;
         atan2(sin(h) * sin(d) * cos(lat1), cos(d) - sin(lat1) * sin(lat2));
     return (lat: lat2 * 180 / pi, lon: lon2 * 180 / pi);
   }
+
+  Position _fakePos(double lat, double lon) => Position(
+        latitude: lat, longitude: lon, timestamp: DateTime.now(),
+        accuracy: 0, altitude: 0, altitudeAccuracy: 0,
+        heading: 0, headingAccuracy: 0, speed: 0, speedAccuracy: 0,
+      );
 }
 
 // ─────────────────────────────────────────────
@@ -196,7 +187,6 @@ out tags;
 // ─────────────────────────────────────────────
 class SpeedometerScreen extends StatefulWidget {
   const SpeedometerScreen({super.key});
-
   @override
   State<SpeedometerScreen> createState() => _SpeedometerScreenState();
 }
@@ -204,10 +194,8 @@ class SpeedometerScreen extends StatefulWidget {
 class _SpeedometerScreenState extends State<SpeedometerScreen>
     with TickerProviderStateMixin {
   final _overpass = OverpassService();
-
   SpeedData _data = const SpeedData(speedKmh: 0, hasGps: false);
   StreamSubscription<Position>? _posStream;
-
   bool _permissionDenied = false;
   bool _wasOverLimit = false;
 
@@ -218,16 +206,14 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
   void initState() {
     super.initState();
     WakelockPlus.enable();
-
     _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 600),
+      duration: const Duration(milliseconds: 500),
     )..addStatusListener((s) {
         if (s == AnimationStatus.completed) _pulseController.reverse();
       });
-    _pulseAnim = Tween<double>(begin: 1.0, end: 1.06).animate(
-        CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
-
+    _pulseAnim = Tween<double>(begin: 1.0, end: 1.04)
+        .animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
     _requestAndStart();
   }
 
@@ -239,7 +225,6 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
     super.dispose();
   }
 
-  // ── Permissions ──────────────────────────────
   Future<void> _requestAndStart() async {
     var status = await Permission.locationWhenInUse.request();
     if (status.isDenied || status.isPermanentlyDenied) {
@@ -249,55 +234,52 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
     _startTracking();
   }
 
-  // ── GPS Stream ───────────────────────────────
   void _startTracking() {
+    // distanceFilter: 0 — получаем каждое обновление GPS без фильтрации
     const settings = LocationSettings(
       accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 5,
+      distanceFilter: 0,
     );
-
     _posStream = Geolocator.getPositionStream(locationSettings: settings)
         .listen(_onPosition, onError: (_) {
       setState(() {
-        _data = SpeedData(
-          speedKmh: _data.speedKmh,
-          currentLimit: _data.currentLimit,
-          hasGps: false,
-        );
+        _data = SpeedData(speedKmh: _data.speedKmh,
+            currentLimit: _data.currentLimit, hasGps: false);
       });
     });
   }
 
   Future<void> _onPosition(Position pos) async {
     final speedKmh = pos.speed < 0 ? 0.0 : pos.speed * 3.6;
+    final isMoving = speedKmh > 3;
 
-    // Fetch current + next limit in parallel
-    final currentFuture = _overpass.fetchLimit(pos.latitude, pos.longitude);
-    final nextFuture = pos.speed > 1
-        ? _overpass.fetchNextLimit(pos.latitude, pos.longitude, pos.heading)
+    // Запрашиваем текущий и следующий лимит параллельно
+    final currentFuture = _overpass.fetchCurrentLimit(pos.latitude, pos.longitude);
+    final nextFuture = isMoving
+        ? _overpass.fetchNextLimit(pos.latitude, pos.longitude, pos.heading, speedKmh)
         : Future.value(null);
 
     final results = await Future.wait([currentFuture, nextFuture]);
     final currentLimit = results[0];
     final nextLimit = results[1];
 
-    // Distance to "next zone" — approximate 300 m ahead
-    final nextDist = (pos.speed > 1 && nextLimit != null && nextLimit != currentLimit)
-        ? 300.0
-        : null;
+    // Считаем реальное расстояние до точки впереди
+    final lookAheadM = speedKmh > 80 ? 400.0 : speedKmh > 50 ? 300.0 : 200.0;
+
+    // Показываем следующий лимит только если он отличается от текущего
+    final showNext = isMoving &&
+        nextLimit != null &&
+        nextLimit != currentLimit;
 
     final newData = SpeedData(
       speedKmh: speedKmh,
       currentLimit: currentLimit,
-      nextLimit: nextDist != null ? nextLimit : null,
-      nextLimitDistanceM: nextDist,
+      nextLimit: showNext ? nextLimit : null,
+      nextLimitDistanceM: showNext ? lookAheadM : null,
       hasGps: true,
     );
 
-    // Alert on over-limit
-    if (newData.isOverLimit && !_wasOverLimit) {
-      _triggerAlert();
-    }
+    if (newData.isOverLimit && !_wasOverLimit) _triggerAlert();
     _wasOverLimit = newData.isOverLimit;
 
     if (mounted) setState(() => _data = newData);
@@ -310,7 +292,6 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
     });
   }
 
-  // ── BUILD ─────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     if (_permissionDenied) return _buildPermissionScreen();
@@ -330,43 +311,39 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
           child: child,
         ),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 250),
+          // FIX 1: толстая рамка на весь экран
           decoration: BoxDecoration(
-            border: Border.all(
-              color: border,
-              width: 6,
-            ),
+            border: Border.all(color: border, width: 12),
           ),
           child: SafeArea(
             child: Column(
               children: [
-                // ── Top bar ──
+                // GPS индикатор
                 Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 20, vertical: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       _GpsIndicator(hasGps: _data.hasGps),
                       const Text('SPEEDLIMIT',
                           style: TextStyle(
-                              color: Colors.white38,
-                              fontSize: 13,
-                              letterSpacing: 3,
-                              fontWeight: FontWeight.w300)),
-                      const SizedBox(width: 40),
+                              color: Colors.white24,
+                              fontSize: 12,
+                              letterSpacing: 3)),
+                      const SizedBox(width: 50),
                     ],
                   ),
                 ),
 
                 const Spacer(),
 
-                // ── Big speed number ──
+                // Большая цифра скорости
                 AnimatedDefaultTextStyle(
-                  duration: const Duration(milliseconds: 200),
+                  duration: const Duration(milliseconds: 150),
                   style: TextStyle(
                     fontFamily: 'monospace',
-                    fontSize: 140,
+                    fontSize: 150,
                     fontWeight: FontWeight.w900,
                     color: _data.isOverLimit
                         ? const Color(0xFFFF2D2D)
@@ -384,20 +361,24 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
 
                 const Spacer(),
 
-                // ── Current limit badge ──
-                _LimitBadge(limit: _data.currentLimit, isOver: _data.isOverLimit),
+                // Текущий лимит
+                _LimitBadge(
+                    limit: _data.currentLimit, isOver: _data.isOverLimit),
 
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
 
-                // ── Next limit ahead ──
-                if (_data.nextLimit != null &&
-                    _data.nextLimit != _data.currentLimit)
-                  _NextLimitRow(
-                    nextLimit: _data.nextLimit!,
-                    distanceM: _data.nextLimitDistanceM ?? 300,
-                  ),
+                // FIX 2: следующий лимит — крупнее
+                SizedBox(
+                  height: 90,
+                  child: _data.nextLimit != null
+                      ? _NextLimitRow(
+                          nextLimit: _data.nextLimit!,
+                          distanceM: _data.nextLimitDistanceM ?? 300,
+                        )
+                      : const SizedBox(),
+                ),
 
-                const SizedBox(height: 32),
+                const SizedBox(height: 20),
               ],
             ),
           ),
@@ -417,17 +398,14 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
             children: [
               const Icon(Icons.location_off, color: Colors.white38, size: 64),
               const SizedBox(height: 24),
-              const Text(
-                'Нужен доступ к геолокации',
-                style: TextStyle(color: Colors.white, fontSize: 22),
-                textAlign: TextAlign.center,
-              ),
+              const Text('Нужен доступ к геолокации',
+                  style: TextStyle(color: Colors.white, fontSize: 22),
+                  textAlign: TextAlign.center),
               const SizedBox(height: 12),
               const Text(
-                'Приложение использует GPS для определения скорости и ограничений на дороге.',
-                style: TextStyle(color: Colors.white54, fontSize: 15),
-                textAlign: TextAlign.center,
-              ),
+                  'Приложение использует GPS для определения скорости и ограничений на дороге.',
+                  style: TextStyle(color: Colors.white54, fontSize: 15),
+                  textAlign: TextAlign.center),
               const SizedBox(height: 32),
               ElevatedButton(
                 onPressed: () async {
@@ -438,8 +416,7 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF00E676),
                   foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 32, vertical: 14),
+                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
                 ),
@@ -461,29 +438,23 @@ class _SpeedometerScreenState extends State<SpeedometerScreen>
 class _GpsIndicator extends StatelessWidget {
   final bool hasGps;
   const _GpsIndicator({required this.hasGps});
-
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: hasGps ? const Color(0xFF00E676) : Colors.red,
-          ),
+    return Row(children: [
+      Container(
+        width: 8, height: 8,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: hasGps ? const Color(0xFF00E676) : Colors.red,
         ),
-        const SizedBox(width: 6),
-        Text(
-          hasGps ? 'GPS' : 'Нет GPS',
+      ),
+      const SizedBox(width: 6),
+      Text(hasGps ? 'GPS' : 'Нет GPS',
           style: TextStyle(
               color: hasGps ? Colors.white38 : Colors.red,
               fontSize: 12,
-              letterSpacing: 1),
-        ),
-      ],
-    );
+              letterSpacing: 1)),
+    ]);
   }
 }
 
@@ -491,53 +462,44 @@ class _LimitBadge extends StatelessWidget {
   final int? limit;
   final bool isOver;
   const _LimitBadge({this.limit, required this.isOver});
-
   @override
   Widget build(BuildContext context) {
     if (limit == null) {
       return Container(
-        width: 90,
-        height: 90,
+        width: 110, height: 110,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: Colors.white24, width: 3),
+          border: Border.all(color: Colors.white24, width: 4),
         ),
         child: const Center(
-          child: Text('—',
-              style: TextStyle(color: Colors.white38, fontSize: 28)),
-        ),
+            child: Text('—',
+                style: TextStyle(color: Colors.white38, fontSize: 32))),
       );
     }
-
-    return Container(
-      width: 90,
-      height: 90,
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      width: 110, height: 110,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: Colors.white,
         border: Border.all(
           color: isOver ? const Color(0xFFFF2D2D) : const Color(0xFF222222),
-          width: 4,
+          width: 5,
         ),
         boxShadow: isOver
-            ? [
-                BoxShadow(
-                    color: Colors.red.withOpacity(0.5),
-                    blurRadius: 20,
-                    spreadRadius: 4)
-              ]
+            ? [BoxShadow(
+                color: Colors.red.withOpacity(0.6),
+                blurRadius: 24, spreadRadius: 6)]
             : null,
       ),
       child: Center(
-        child: Text(
-          '$limit',
-          style: TextStyle(
-            color: isOver ? Colors.red.shade800 : Colors.black,
-            fontSize: limit! >= 100 ? 26 : 30,
-            fontWeight: FontWeight.w900,
-            height: 1,
-          ),
-        ),
+        child: Text('$limit',
+            style: TextStyle(
+              color: isOver ? Colors.red.shade800 : Colors.black,
+              fontSize: limit! >= 100 ? 30 : 36,
+              fontWeight: FontWeight.w900,
+              height: 1,
+            )),
       ),
     );
   }
@@ -547,42 +509,47 @@ class _NextLimitRow extends StatelessWidget {
   final int nextLimit;
   final double distanceM;
   const _NextLimitRow({required this.nextLimit, required this.distanceM});
-
   @override
   Widget build(BuildContext context) {
     final dist = distanceM < 1000
         ? '${distanceM.round()} м'
         : '${(distanceM / 1000).toStringAsFixed(1)} км';
-
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 32),
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      margin: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.07),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white12),
+        color: Colors.white.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white12, width: 1),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.arrow_forward, color: Colors.white54, size: 18),
-          const SizedBox(width: 8),
+          const Icon(Icons.arrow_forward,
+              color: Colors.white54, size: 22),
+          const SizedBox(width: 10),
+          // FIX 2: крупный текст расстояния
           Text('Через $dist',
-              style: const TextStyle(color: Colors.white54, fontSize: 14)),
-          const SizedBox(width: 12),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '$nextLimit',
               style: const TextStyle(
-                  color: Colors.black,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 16),
+                  color: Colors.white70,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(width: 14),
+          // Крупный знак следующего лимита
+          Container(
+            width: 56, height: 56,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+              border: Border.all(color: Colors.black26, width: 2),
+            ),
+            child: Center(
+              child: Text('$nextLimit',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontWeight: FontWeight.w900,
+                    fontSize: nextLimit >= 100 ? 16 : 20,
+                  )),
             ),
           ),
         ],
